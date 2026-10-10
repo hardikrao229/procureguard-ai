@@ -1,0 +1,6 @@
+mcp==1.30.0
+fastmcp==2.14.7
+google-genai==2.29.0
+streamlit==1.65.0
+python-dotenv==1.2.4
+PyYAML==6.0.3

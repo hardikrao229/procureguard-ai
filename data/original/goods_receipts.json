@@ -1,0 +1,34 @@
+[
+  {
+    "grn_id": "GRN-7001",
+    "po_id": "PO-5001",
+    "receipt_date": "2026-09-18",
+    "lines": [
+      {"item_code": "PKG-BOX-L", "qty_received": 2000, "qty_accepted": 2000, "qty_rejected": 0, "remarks": "All boxes passed inspection"}
+    ]
+  },
+  {
+    "grn_id": "GRN-7002",
+    "po_id": "PO-5002",
+    "receipt_date": "2026-09-28",
+    "lines": [
+      {"item_code": "STL-MS-2MM", "qty_received": 1000, "qty_accepted": 950, "qty_rejected": 50, "remarks": "50 sheets rejected - surface rust and thickness below 1.9mm"}
+    ]
+  },
+  {
+    "grn_id": "SES-7003",
+    "po_id": "PO-5003",
+    "receipt_date": "2026-08-31",
+    "lines": [
+      {"item_code": "SVC-IT-AMC", "qty_received": 1, "qty_accepted": 1, "qty_rejected": 0, "remarks": "Service entry sheet - AMC quarter 1 delivered and signed off by IT head"}
+    ]
+  },
+  {
+    "grn_id": "GRN-7005",
+    "po_id": "PO-5005",
+    "receipt_date": "2026-10-03",
+    "lines": [
+      {"item_code": "OFF-A4-REAM", "qty_received": 2000, "qty_accepted": 2000, "qty_rejected": 0, "remarks": "Received in full"}
+    ]
+  }
+]
