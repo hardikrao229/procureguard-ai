@@ -25,8 +25,8 @@ from google.genai import errors
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-import p2p_server as erp                      # read-only views for the dashboard
 from agent import ProcureGuardAgent
+from dashboard import render as render_dashboard
 from policy import POLICY_FILE, inr, load_policy
 from policy_gate import LOG_DIR, PolicyGate
 from reset_data import LIVE, reset
@@ -172,8 +172,8 @@ if api_key and "llm" not in state:
 # Tabs
 # ======================================================================
 queue_label = f"✅ Approvals ({len(state.queue)})" if state.queue else "✅ Approvals"
-tab_desk, tab_approvals, tab_dash, tab_audit, tab_policy, tab_how = st.tabs(
-    ["🤖 Agent Desk", queue_label, "📊 AP Dashboard", "🧾 Audit Trail", "📘 Policy & Skills", "🧭 How it works"])
+tab_dash, tab_desk, tab_approvals, tab_audit, tab_policy, tab_how = st.tabs(
+    ["📊 AP Dashboard", "🤖 Agent Desk", queue_label, "🧾 Audit Trail", "📘 Policy & Skills", "🧭 How it works"])
 
 # ----------------------------------------------------------------------
 # 1. Agent Desk - chat with the chosen expert
@@ -262,44 +262,7 @@ with tab_approvals:
 # 3. AP Dashboard - the ERP as the agents see it
 # ----------------------------------------------------------------------
 with tab_dash:
-    invoices = json.loads((LIVE / "invoices.json").read_text(encoding="utf-8"))
-    vendors = {v["vendor_id"]: v for v in json.loads((LIVE / "vendors.json").read_text(encoding="utf-8"))}
-    cash = erp.get_cash_position()
-    open_inv = [i for i in invoices if i["status"] == "RECEIVED"]
-    held = [i for i in invoices if i["status"] == "ON_HOLD"]
-    paid = [i for i in invoices if i["status"] == "PAID"]
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Open invoices", len(open_inv), help=inr(sum(i["total_inr"] for i in open_inv)), border=True)
-    k2.metric("On hold", len(held), help=inr(sum(i["total_inr"] for i in held)), border=True)
-    k3.metric("Paid", len(paid), help=inr(sum(i["total_inr"] for i in paid)), border=True)
-    k4.metric("Payable capacity today", inr(cash["payable_capacity_today_inr"]), border=True)
-
-    rows = []
-    for inv in invoices:
-        match = erp.three_way_match(inv["invoice_id"])
-        dup = erp.check_duplicate_invoice(inv["invoice_id"])
-        risk = erp.calculate_vendor_risk_score(inv["vendor_id"])
-        rows.append({
-            "Invoice": inv["invoice_id"], "Vendor": vendors[inv["vendor_id"]]["name"],
-            "PO": inv["po_id"] or "NONE", "Date": inv["invoice_date"], "Total": inr(inv["total_inr"]),
-            "Status": inv["status"], "3-way match": match["match_result"],
-            "Duplicate check": dup["duplicate_verdict"], "Vendor risk": f"{risk['risk_band']} ({risk['risk_score']})",
-        })
-    st.markdown("**Invoice queue** · live ERP checks (deterministic, no AI)")
-    st.dataframe(pd.DataFrame(rows), hide_index=True)
-
-    risk_rows = []
-    for vid, v in vendors.items():
-        r = erp.calculate_vendor_risk_score(vid)
-        risk_rows.append({"Vendor": v["name"], "Risk score": r["risk_score"], "Band": r["risk_band"],
-                          "GSTIN": v["gstin_status"], "MSME": "Yes" if v["msme_udyam_no"] else "No",
-                          "Terms": v["payment_terms"]})
-    left, right = st.columns([3, 2])
-    left.markdown("**Vendor risk register**")
-    left.dataframe(pd.DataFrame(risk_rows), hide_index=True)
-    right.markdown("**Vendor risk score (0-100)**")
-    right.bar_chart(pd.DataFrame(risk_rows).set_index("Vendor")["Risk score"], horizontal=True)
+    render_dashboard()
 
 # ----------------------------------------------------------------------
 # 4. Audit Trail - every gate decision and every payment
