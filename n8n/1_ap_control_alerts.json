@@ -1,0 +1,221 @@
+{
+  "name": "ProcureGuard 1 - AP control alerts",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "procureguard-events",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "1b9c5d71-dd52-5bf3-83ac-71f8eafccc4f",
+      "name": "Webhook: ProcureGuard event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "6a1f3c2e-8b7d-4e15-9c0a-2f4b6d8e1a37"
+    },
+    {
+      "parameters": {
+        "jsCode": "// One ProcureGuard event in, one formatted message out.\n// Decides which team must act, builds the email text, and flags whether a person is needed.\nconst e = $input.first().json.body ?? $input.first().json;\nconst p = e.payload || {};\nconst rs = v => (v === null || v === undefined || v === '') ? '-' : 'Rs ' + Number(v).toLocaleString('en-IN');\nconst FORM = 'http://localhost:5678/form/bank-change-callback';\nlet team = 'log_only', subject = e.event, text = '';\n\nswitch (e.event) {\n  case 'APPROVAL_REQUIRED':\n    team = 'finance_controller';\n    subject = `Approval needed: ${p.invoice_id} for ${rs(p.amount_inr)}`;\n    text = `ProcureGuard has parked a payment for your approval.\\n\\nInvoice: ${p.invoice_id}\\nAmount: ${rs(p.amount_inr)}\\nWhy: ${p.reason}\\nAgent's note: ${p.agent_note || '-'}\\n\\nOpen the Approvals tab in ProcureGuard to approve or reject. The MCP server re-checks every control before money moves.`;\n    break;\n  case 'VENDOR_RISK_ALERT':\n    team = p.bank_change_in_cooling_period ? 'vendor_master' : 'finance_controller';\n    subject = `Vendor risk ${p.risk_band}: ${p.vendor_name} (${p.vendor_id})`;\n    text = `Risk score ${p.risk_score}/100 (${p.risk_band}).\\nTriggered factors: ${(p.triggered || []).join(', ') || 'none'}.\\n`;\n    if (p.bank_change_in_cooling_period) {\n      text += `\\nBank details changed inside the cooling period, so all payments to this vendor are FROZEN.\\n` +\n              `Call the authorised contact on the phone number ON FILE in the contract (never a number from the change request),\\n` +\n              `then record the result here: ${FORM}`;\n    }\n    break;\n  case 'INJECTION_DETECTED':\n    team = 'internal_audit';\n    subject = `Prompt-injection attempt in ${p.source} of ${p.invoice_id}`;\n    text = `Supplier text tried to instruct the AI agents.\\nRed flags: ${(p.red_flags || []).join(', ')}.\\nThe agents ignored it and the invoice was not paid. Please review the supplier.`;\n    break;\n  case 'SERVER_CONTROL_REJECTION':\n    team = 'internal_audit';\n    subject = `Payment refused by server controls: ${p.invoice_id}`;\n    text = `The MCP server refused a payment that had passed the client gate.\\nReasons:\\n- ${(p.reasons || []).join('\\n- ')}`;\n    break;\n  case 'GATE_BLOCKED':\n    team = 'internal_audit';\n    subject = `Policy gate blocked ${p.tool}`;\n    text = `Blocked call: ${p.tool} ${JSON.stringify(p.arguments)}\\nReason: ${p.reason}`;\n    break;\n  case 'INVOICE_ON_HOLD':\n    team = 'ap_team';\n    subject = `${p.invoice_id} put on hold`;\n    text = `Reason: ${p.reason}`;\n    break;\n  case 'PAYMENT_RELEASED':\n    team = 'treasury_log';\n    subject = `Paid ${p.invoice_id}: ${rs(p.amount_inr)} (${p.reference})`;\n    text = `New bank balance: ${rs(p.new_bank_balance_inr)}`;\n    break;\n  case 'APPROVAL_DECISION':\n    team = 'treasury_log';\n    subject = `${p.approver} ${p.decision} ${p.invoice_id} (${rs(p.amount_inr)})`;\n    break;\n  default:\n    subject = `Event ${e.event}`;\n    text = JSON.stringify(p);\n}\n\nconst TO = {\n  finance_controller: 'finance.controller@procureguard.example',\n  vendor_master: 'vendor.master@procureguard.example, finance.controller@procureguard.example',\n  internal_audit: 'internal.audit@procureguard.example, finance.controller@procureguard.example',\n};\nreturn [{ json: {\n  event_id: e.event_id, event: e.event, severity: e.severity, agent: e.agent, about: e.key || '',\n  team, needs_person: Boolean(TO[team]), to: TO[team] || '',\n  subject: `[ProcureGuard ${String(e.severity).toUpperCase()}] ${subject}`,\n  text: text + `\\n\\nBusiness date ${e.business_date} | event ${e.event_id} | raised by ${e.agent}`,\n  payload: JSON.stringify(p), occurred_at: e.occurred_at,\n} }];"
+      },
+      "id": "db80a775-59d7-5807-add4-048846a5823f",
+      "name": "Route & format message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "ap_events",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "event_id": "={{ $json.event_id }}",
+            "event": "={{ $json.event }}",
+            "severity": "={{ $json.severity }}",
+            "team": "={{ $json.team }}",
+            "about": "={{ $json.about }}",
+            "subject": "={{ $json.subject }}",
+            "payload": "={{ $json.payload }}",
+            "occurred_at": "={{ $json.occurred_at }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "f39cf855-16cd-5338-b43d-206770304626",
+      "name": "Log event in Postgres (ap_events)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "f31nTTmKLScBFVRI",
+          "name": "ProcureGuard Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.needs_person }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "270c323e-2011-5af8-be5e-aec31925a7d3",
+      "name": "Needs a person?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        500,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "procureguard@procureguard.example",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.text }}",
+        "options": {}
+      },
+      "id": "100a781a-5889-51fa-9441-1f6370094458",
+      "name": "Email the responsible team",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        760,
+        320
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "C3CfRP0MD3KgT69a",
+          "name": "Company SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "a4195200-8293-528f-b429-284541aec6b5",
+      "name": "Logged only (no email)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        760,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 1. AP control alerts\nProcureGuard posts every control event here (holds, approvals, fraud flags, blocked calls, payments).\nEvery event is logged in Postgres; events that need a person are emailed to the Finance Controller, Vendor Master team or Internal Audit.",
+        "height": 180,
+        "width": 520,
+        "color": 5
+      },
+      "id": "c03a861e-a0b8-5cfd-bcc3-8401a116aa67",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -40
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: ProcureGuard event": {
+      "main": [
+        [
+          {
+            "node": "Route & format message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route & format message": {
+      "main": [
+        [
+          {
+            "node": "Log event in Postgres (ap_events)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Needs a person?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs a person?": {
+      "main": [
+        [
+          {
+            "node": "Email the responsible team",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Logged only (no email)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

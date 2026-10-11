@@ -57,8 +57,12 @@ def main():
                     "params": {"name": "three_way_match", "arguments": {"invoice_id": "INV-1002"}}},
              5, "Tool execution: three-way match on INV-1002")
         send(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                    "params": {"name": "search_p2p_knowledge",
+                               "arguments": {"query": "price variation clause", "doc_type": "contract", "vendor_id": "V002"}}},
+             6, "RAG tool: search the knowledge base for Apex Steel's price clause")
+        send(proc, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
                     "params": {"name": "no_such_tool", "arguments": {}}},
-             6, "Error handling: calling a tool that does not exist")
+             7, "Error handling: calling a tool that does not exist")
     finally:
         print("\nTerminating server subprocess.")
         proc.terminate()

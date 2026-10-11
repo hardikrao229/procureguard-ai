@@ -1,0 +1,292 @@
+{
+  "name": "ProcureGuard 3 - Bank-change call-back form",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Bank-change call-back verification",
+        "formDescription": "Fill this after calling the vendor on the phone number ON FILE in the contract. ProcureGuard keeps payments frozen until this check passes.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Vendor",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "V001"
+                  },
+                  {
+                    "option": "V002"
+                  },
+                  {
+                    "option": "V003"
+                  },
+                  {
+                    "option": "V004"
+                  },
+                  {
+                    "option": "V005"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Phone number called",
+              "placeholder": "+91-...",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Person spoken to",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Did the vendor confirm they asked for the change?",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Yes"
+                  },
+                  {
+                    "option": "No"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Verified by",
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "onReceived",
+        "options": {
+          "path": "bank-change-callback"
+        }
+      },
+      "id": "1cd82896-9a7d-5d75-972a-0aad63449806",
+      "name": "Call-back form (Vendor Master team)",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "9c2d4e6f-1a3b-4c5d-8e7f-0a1b2c3d4e5f"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compares the call-back with the phone number ON FILE in the vendor's contract\n// (the same numbers the ProcureGuard knowledge base holds in knowledge_base/contracts/).\nconst ON_FILE = {\n  V001: { phone: '+91-124-400-1101', contact: 'Anil Shree' },\n  V002: { phone: '+91-11-4055-0182', contact: 'Rajesh Mehta' },\n  V003: { phone: '+91-124-466-2290', contact: 'Priya Nair' },\n  V004: { phone: '+91-120-455-7710', contact: 'Sandeep Rawat' },\n  V005: { phone: '+91-124-410-3302', contact: 'Vikram Sethi' },\n};\nconst f = $input.first().json;\nconst digits = s => String(s || '').replace(/\\D/g, '');\nconst vendor = f['Vendor'];\nconst file = ON_FILE[vendor] || {};\nconst reasons = [];\nif (digits(f['Phone number called']) !== digits(file.phone)) {\n  reasons.push(`Number called (${f['Phone number called']}) is not the number on file (${file.phone}). A number supplied in the change request may belong to the fraudster.`);\n}\nif (!String(f['Person spoken to']).toLowerCase().includes(String(file.contact || '').split(' ').pop().toLowerCase())) {\n  reasons.push(`Person spoken to is not the authorised contact on file (${file.contact}).`);\n}\nif (f['Did the vendor confirm they asked for the change?'] !== 'Yes') {\n  reasons.push('The authorised contact did NOT confirm the bank change request.');\n}\nconst verified = reasons.length === 0;\nreturn [{ json: {\n  vendor_id: vendor, phone_called: f['Phone number called'], phone_on_file: file.phone || 'not on file',\n  person_spoken_to: f['Person spoken to'], vendor_confirmed: f['Did the vendor confirm they asked for the change?'],\n  verified_by: f['Verified by'], verified, result: verified ? 'VERIFIED' : 'FAILED',\n  reasons: reasons.join(' ') || 'All checks passed',\n} }];"
+      },
+      "id": "bbe0329d-3a94-515d-a8f0-f2d1e6a8a847",
+      "name": "Check against phone on file",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "callback_verifications",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "vendor_id": "={{ $json.vendor_id }}",
+            "phone_called": "={{ $json.phone_called }}",
+            "phone_on_file": "={{ $json.phone_on_file }}",
+            "person_spoken_to": "={{ $json.person_spoken_to }}",
+            "vendor_confirmed": "={{ $json.vendor_confirmed }}",
+            "result": "={{ $json.result }}",
+            "reasons": "={{ $json.reasons }}",
+            "verified_by": "={{ $json.verified_by }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "c6b80c78-9b3e-5b49-a863-0afdce84e190",
+      "name": "Record result in Postgres",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        480,
+        120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "f31nTTmKLScBFVRI",
+          "name": "ProcureGuard Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.verified }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "558e4d91-f859-53bd-9d4e-ffe6ce585ae2",
+      "name": "Verified?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "procureguard@procureguard.example",
+        "toEmail": "vendor.master@procureguard.example, treasury@procureguard.example",
+        "subject": "=Call-back VERIFIED for {{ $json.vendor_id }} - payments may be unfrozen",
+        "emailFormat": "text",
+        "text": "=Vendor {{ $json.vendor_id }}: the authorised contact {{ $json.person_spoken_to }} confirmed the bank change on the phone number on file ({{ $json.phone_on_file }}).\nVerified by {{ $json.verified_by }}. Vendor Master may now record the call-back; payments resume through ProcureGuard's normal checks.",
+        "options": {}
+      },
+      "id": "178974ec-5513-5060-801c-9a68392117f3",
+      "name": "Email: change verified, unfreeze",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        740,
+        320
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "C3CfRP0MD3KgT69a",
+          "name": "Company SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "procureguard@procureguard.example",
+        "toEmail": "finance.controller@procureguard.example, internal.audit@procureguard.example",
+        "subject": "=Call-back FAILED for {{ $json.vendor_id }} - possible bank-change fraud",
+        "emailFormat": "text",
+        "text": "=Vendor {{ $json.vendor_id }}: the bank change could NOT be verified.\n{{ $json.reasons }}\n\nAction: revert the vendor master to the old account today, keep payments frozen, and open a fraud review.",
+        "options": {}
+      },
+      "id": "4eacd3be-6849-5331-91ed-af1eadb227b9",
+      "name": "Email: FAILED - revert and escalate",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        740,
+        540
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "C3CfRP0MD3KgT69a",
+          "name": "Company SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 3. Bank-change call-back form\nHuman-in-the-loop step for the Vendor Master team. n8n checks the number they called against the phone on file in the contract and records VERIFIED or FAILED; failures go to the Finance Controller and Internal Audit.",
+        "height": 180,
+        "width": 560,
+        "color": 6
+      },
+      "id": "6d7c5b69-b1f7-5b52-8145-c5da3a78e78c",
+      "name": "Note 3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        40
+      ]
+    }
+  ],
+  "connections": {
+    "Call-back form (Vendor Master team)": {
+      "main": [
+        [
+          {
+            "node": "Check against phone on file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check against phone on file": {
+      "main": [
+        [
+          {
+            "node": "Record result in Postgres",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Verified?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verified?": {
+      "main": [
+        [
+          {
+            "node": "Email: change verified, unfreeze",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Email: FAILED - revert and escalate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

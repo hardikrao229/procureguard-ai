@@ -1,0 +1,210 @@
+{
+  "name": "ProcureGuard 2 - Daily MSME & discount digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "fe03fe40-7daa-54a7-aea3-beb3992ddc1c",
+      "name": "Every day 09:00 IST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://raw.githubusercontent.com/hardikrao229/procureguard-ai/main/data/original/invoices.json",
+        "options": {}
+      },
+      "id": "aa498588-f016-52e8-b662-65f1d1bf9bca",
+      "name": "Get open invoices",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://raw.githubusercontent.com/hardikrao229/procureguard-ai/main/data/original/vendors.json",
+        "options": {}
+      },
+      "id": "54c773fe-5ed2-541a-9cc8-1465a3baae39",
+      "name": "Get vendor master",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds the morning digest from the open invoices and the vendor master.\n// Demo business date = 2026-10-10 (the date ProcureGuard's policy file uses). In production use new Date().\nconst AS_OF = new Date('2026-10-10');\nconst DAY = 86400000;\nconst invoices = $('Get open invoices').all().map(i => i.json);\nconst vendors = Object.fromEntries($('Get vendor master').all().map(v => [v.json.vendor_id, v.json]));\nconst add = (d, n) => new Date(new Date(d).getTime() + n * DAY);\nconst fmt = d => d.toISOString().slice(0, 10);\nconst rs = v => 'Rs ' + Number(v).toLocaleString('en-IN');\n\nconst msme = [], discount = [], overdue = [], nonPo = [];\nfor (const inv of invoices) {\n  if (['PAID', 'REJECTED'].includes(inv.status)) continue;\n  const v = vendors[inv.vendor_id] || {};\n  const net = Number((v.payment_terms || '').match(/Net\\s*(\\d+)/i)?.[1] || 30);\n  let due = add(inv.invoice_date, net);\n  if (v.msme_udyam_no) {\n    const deadline = add(inv.invoice_date, 45);\n    if (deadline < due) due = deadline;\n    const left = Math.round((deadline - AS_OF) / DAY);\n    if (left <= 7) msme.push(`${inv.invoice_id} ${v.name}: ${rs(inv.total_inr)}, MSME deadline ${fmt(deadline)} (${left} days left)`);\n  }\n  const disc = (v.payment_terms || '').match(/(\\d+(?:\\.\\d+)?)\\s*\\/\\s*(\\d+)/);\n  if (disc) {\n    const until = add(inv.invoice_date, Number(disc[2]));\n    const saving = inv.taxable_value_inr * Number(disc[1]) / 100;\n    if (until >= AS_OF) discount.push(`${inv.invoice_id} ${v.name}: save ${rs(saving)} if paid by ${fmt(until)}`);\n  }\n  if (due < AS_OF) overdue.push(`${inv.invoice_id} ${v.name}: ${rs(inv.total_inr)} was due ${fmt(due)}`);\n  if (!inv.po_id) nonPo.push(`${inv.invoice_id} ${v.name}: ${rs(inv.total_inr)} has no purchase order`);\n}\nconst section = (title, rows) => `${title} (${rows.length})\\n` + (rows.length ? rows.map(r => '- ' + r).join('\\n') : '- none');\nconst body = [\n  `ProcureGuard morning digest for ${fmt(AS_OF)}`, '',\n  section('MSME payments due within 7 days', msme), '',\n  section('Early-payment discounts still open', discount), '',\n  section('Overdue invoices', overdue), '',\n  section('Invoices without a purchase order', nonPo), '',\n  'Ask the ProcureGuard Payment Approval agent to process the MSME items first.',\n].join('\\n');\nreturn [{ json: { business_date: fmt(AS_OF), msme_due_7d: msme.length, discounts_open: discount.length,\n  overdue: overdue.length, non_po: nonPo.length, body,\n  subject: `ProcureGuard digest ${fmt(AS_OF)}: ${msme.length} MSME due, ${discount.length} discounts open, ${nonPo.length} non-PO` } }];"
+      },
+      "id": "d5dd4cf4-0ae3-5534-baae-8a73c4bdd739",
+      "name": "Build digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "procureguard@procureguard.example",
+        "toEmail": "finance.controller@procureguard.example, treasury@procureguard.example",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "060e671d-78c9-55cc-b64e-8752ae0edf7b",
+      "name": "Email Finance Controller & Treasury",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        900,
+        200
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "C3CfRP0MD3KgT69a",
+          "name": "Company SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "msme_digest",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "business_date": "={{ $json.business_date }}",
+            "msme_due_7d": "={{ $json.msme_due_7d }}",
+            "discounts_open": "={{ $json.discounts_open }}",
+            "overdue": "={{ $json.overdue }}",
+            "non_po": "={{ $json.non_po }}",
+            "body": "={{ $json.body }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "1074a177-8798-5ebf-b5ed-5b5e8b49b95e",
+      "name": "Save digest in Postgres",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        900,
+        420
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "f31nTTmKLScBFVRI",
+          "name": "ProcureGuard Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 2. Daily MSME & discount digest\nEvery morning: read open invoices and the vendor master, list MSME deadlines within 7 days (MSMED Act, 45 days), open early-payment discounts, overdue and non-PO invoices. Email it and keep a copy in Postgres.",
+        "height": 180,
+        "width": 560,
+        "color": 4
+      },
+      "id": "633cba94-4582-55fd-9202-19dd08fd60b4",
+      "name": "Note 2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        40
+      ]
+    }
+  ],
+  "connections": {
+    "Every day 09:00 IST": {
+      "main": [
+        [
+          {
+            "node": "Get open invoices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get open invoices": {
+      "main": [
+        [
+          {
+            "node": "Get vendor master",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get vendor master": {
+      "main": [
+        [
+          {
+            "node": "Build digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build digest": {
+      "main": [
+        [
+          {
+            "node": "Email Finance Controller & Treasury",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save digest in Postgres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

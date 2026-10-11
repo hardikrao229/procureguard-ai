@@ -7,6 +7,8 @@ Deploy:        push to GitHub, then create the app on share.streamlit.io (main f
 Same architecture as agent.py, with a web front end:
   Browser (this app) -> Gemini (reasons) -> PolicyGate (approval queue) -> MCP client -> p2p_server.py
 Large payments are parked in an APPROVAL QUEUE; the Finance Controller clicks Approve / Reject.
+Added in v2.1: a Policy & Contract Assistant (agentic RAG over SOPs, MSME/GST notes, vendor contracts
+and vendor emails), n8n automation for follow-up work, a red-team lab and a session record.
 """
 import asyncio
 import json
@@ -17,6 +19,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import base64
+import zlib
+
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -25,6 +30,9 @@ from google.genai import errors
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+import automation
+import kb_index
+import rag_agent
 from agent import ProcureGuardAgent
 from dashboard import render as render_dashboard
 from policy import POLICY_FILE, inr, load_policy
@@ -64,10 +72,56 @@ def setting(name: str, default: str = "") -> str:
 state = st.session_state
 state.setdefault("chats", {})                # one conversation per agent
 state.setdefault("queue", [])                # payments waiting for a human
+state.setdefault("rag_runs", [])             # Policy Assistant questions and answers
+state.setdefault("red_team", [])             # red-team results run in this session
+os.environ.setdefault("N8N_WEBHOOK_URL", setting("N8N_WEBHOOK_URL"))
+REPLAY_DIR = os.getenv("PG_REPLAY_DIR", "")  # local only: re-display a recorded cloud session
 
 
 def chat_for(skill_name: str) -> dict:
     return state.chats.setdefault(skill_name, {"messages": [], "history": []})
+
+
+# ======================================================================
+# Session record: export what happened in this browser session, and replay it locally
+# ======================================================================
+state.setdefault("started_at", datetime.now().isoformat(timespec="seconds"))
+
+
+def _jsonl(path: Path) -> list:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def session_record(model_used: str) -> dict:
+    since = state.started_at
+    return {
+        "format": "procureguard-session-v1", "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "model": model_used,
+        "chats": {name: c["messages"] for name, c in state.chats.items()},
+        "queue": state.queue, "rag_runs": state.rag_runs, "red_team": state.red_team,
+        "invoices": json.loads((LIVE / "invoices.json").read_text(encoding="utf-8")),
+        "treasury": json.loads((LIVE / "treasury.json").read_text(encoding="utf-8")),
+        "audit": [e for e in _jsonl(LOG_DIR / "audit_log.jsonl") if e["timestamp"] >= since],
+        "outbox": [e for e in automation.read_outbox() if e["occurred_at"] >= since],
+        "policy": POLICY_FILE.read_text(encoding="utf-8"),
+    }
+
+
+def encode_record(record: dict) -> str:
+    return base64.b64encode(zlib.compress(json.dumps(record, default=str).encode("utf-8"), 9)).decode("ascii")
+
+
+def load_record(record: dict) -> None:
+    """Replay: put a recorded session back on screen (no AI calls are made)."""
+    state.chats = {name: {"messages": msgs, "history": []} for name, msgs in record["chats"].items()}
+    state.queue, state.rag_runs, state.red_team = record["queue"], record["rag_runs"], record["red_team"]
+    (LIVE / "invoices.json").write_text(json.dumps(record["invoices"], indent=2), encoding="utf-8")
+    (LIVE / "treasury.json").write_text(json.dumps(record["treasury"], indent=2), encoding="utf-8")
+    (LOG_DIR / "audit_log.jsonl").write_text("".join(json.dumps(e) + "\n" for e in record["audit"]), encoding="utf-8")
+    automation.OUTBOX.write_text("".join(json.dumps(e) + "\n" for e in record["outbox"]), encoding="utf-8")
+    POLICY_FILE.write_text(record["policy"], encoding="utf-8")
 
 
 # ======================================================================
@@ -103,10 +157,17 @@ async def decide(request: dict, approved: bool, approver: str):
                 await session.initialize()
                 gate = PolicyGate(session, load_policy(), payment_skill["meta"], approval_mode="defer")
                 gate.record_human_decision(request, approved, approver)
+                invoice_id = request["arguments"].get("invoice_id", "")
+                automation.emit("APPROVAL_DECISION", "finance-controller", key=invoice_id, invoice_id=invoice_id,
+                                decision="APPROVED" if approved else "REJECTED", approver=approver,
+                                amount_inr=request["arguments"].get("amount_inr"))
                 if not approved:
                     return {"status": "REJECTED_BY_APPROVER"}
                 result = await session.call_tool("release_payment", arguments=request["arguments"])
-                return json.loads(result.content[0].text)        # the server still re-checks every control
+                data = json.loads(result.content[0].text)        # the server still re-checks every control
+                automation.from_tool_call("finance-controller", "release_payment", request["arguments"],
+                                          "HUMAN APPROVED", data)
+                return data
 
 
 def friendly_error(e: Exception) -> str:
@@ -164,6 +225,21 @@ with st.sidebar:
         st.toast("Demo data reset")
         st.rerun()
 
+    if REPLAY_DIR:
+        files = sorted(Path(REPLAY_DIR).glob("*.json"))
+        pick = st.selectbox("Recorded session", [f.stem for f in files])
+        if pick and state.get("replayed") != pick:
+            load_record(json.loads((Path(REPLAY_DIR) / f"{pick}.json").read_text(encoding="utf-8")))
+            state.replayed = pick
+            st.rerun()
+        st.caption("Replay of a session recorded on the live app. No AI calls are made.")
+    else:
+        with st.expander("Session record (for the project report)"):
+            st.caption("A compressed copy of this session: chats, tool calls, approvals, RAG answers, "
+                       "n8n events and the audit log. It can be re-displayed offline.")
+            if st.button("Create record", width="stretch"):
+                st.code(encode_record(session_record(model)), language=None, wrap_lines=True)
+
 if api_key and "llm" not in state:
     state.llm = genai.Client(api_key=api_key)
 
@@ -172,8 +248,9 @@ if api_key and "llm" not in state:
 # Tabs
 # ======================================================================
 queue_label = f"✅ Approvals ({len(state.queue)})" if state.queue else "✅ Approvals"
-tab_dash, tab_desk, tab_approvals, tab_audit, tab_policy, tab_how = st.tabs(
-    ["📊 AP Dashboard", "🤖 Agent Desk", queue_label, "🧾 Audit Trail", "📘 Policy & Skills", "🧭 How it works"])
+tab_dash, tab_desk, tab_rag, tab_approvals, tab_auto, tab_audit, tab_policy, tab_red, tab_how = st.tabs(
+    ["📊 AP Dashboard", "🤖 Agent Desk", "📚 Policy Assistant", queue_label, "⚡ Automation (n8n)",
+     "🧾 Audit Trail", "📘 Policy & Skills", "🧪 Red Team", "🧭 How it works"])
 
 # ----------------------------------------------------------------------
 # 1. Agent Desk - chat with the chosen expert
@@ -329,6 +406,171 @@ with tab_policy:
     with m2.container(height=420):
         st.markdown(chosen["body"])
 
+
+# ----------------------------------------------------------------------
+# 7. Policy Assistant - agentic RAG over SOPs, regulations, contracts and vendor emails
+# ----------------------------------------------------------------------
+RAG_SUGGESTIONS = [
+    "Who do we call to verify the Apex Steel bank change?",
+    "Can Greenleaf charge Rs 410 per carton of A4 paper?",
+    "Nova says the Pune trip was approved verbally. Is that enough, and what rate applies?",
+    "What happens if we pay QuickTech's invoice late?",
+    "Can we claim GST credit on Nova Logistics' invoice?",
+    "Is it allowed to pay two Greenleaf invoices separately to stay under Rs 5 lakh?",
+]
+TRUST_BADGE = {"internal": "🟢 company document", "vendor-submitted": "🔴 vendor-submitted (untrusted)"}
+
+with tab_rag:
+    st.subheader("📚 Policy & Contract Assistant")
+    st.caption("Agentic RAG: route → hybrid retrieval (ChromaDB dense vectors + BM25 keywords, fused) → "
+               "Gemini grades each passage → rewrite and retrieve again if needed → answer with citations → "
+               "code checks the citations. Vendor emails are screened for prompt injection before indexing.")
+    info = kb_index.stats()
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Documents", info["documents"])
+    k2.metric("Chunks indexed", info["chunks"])
+    k3.metric("Vector size", info["dense_dimensions"])
+    k4.metric("Chunks masked by injection screen", len(info["screened_chunks"]))
+
+    use_ai = st.toggle("Use Gemini for grading, rewriting and answering", value=bool(api_key),
+                       help="Off = backup mode: rule-based grading and an extractive answer, no API calls.")
+    rag_clicked = None
+    rcols = st.columns(3)
+    for i, text in enumerate(RAG_SUGGESTIONS):
+        if rcols[i % 3].button(text, key=f"rag-{i}", width="stretch"):
+            rag_clicked = text
+    with st.form("rag-form", clear_on_submit=True):
+        typed = st.text_input("Ask about a policy, a law, a vendor contract or a vendor's email")
+        asked = st.form_submit_button("Ask", type="primary")
+    question = rag_clicked or (typed if asked and typed.strip() else None)
+    if question:
+        with st.spinner("Retrieving, grading and answering..."):
+            try:
+                llm = state.get("llm") if use_ai else None
+                result = rag_agent.ask(question, llm, model)
+            except Exception as e:                                       # noqa: BLE001
+                st.warning(f"Gemini step failed ({friendly_error(e)}). Answering in backup mode.")
+                result = rag_agent.ask(question, None, model)
+        result["asked_at"] = datetime.now().strftime("%H:%M:%S")
+        state.rag_runs.append(result)
+
+    for run in reversed(state.rag_runs):
+        with st.container(border=True):
+            st.markdown(f"**Q: {run['question']}**  \n<span style='color:#52514e;font-size:.85rem'>"
+                        f"{run.get('asked_at', '')} · mode: {run['mode']}</span>", unsafe_allow_html=True)
+            st.markdown(run["answer"])
+            for w in run["warnings"]:
+                st.warning(w, icon="⚠️")
+            a, b = st.columns([2, 3])
+            with a.expander("Agent steps", expanded=False):
+                st.dataframe(pd.DataFrame(run["steps"]), hide_index=True)
+            with b.expander(f"Sources used ({len(run['sources'])})", expanded=False):
+                for src in run["sources"]:
+                    st.markdown(f"**[{src['source']}] {src['title']} › {src['section']}**  \n"
+                                f"{TRUST_BADGE.get(src['trust'], src['trust'])} · `{src['chunk_id']}` · "
+                                f"fused {src['rrf']} · dense {src['dense_sim']} · BM25 {src['bm25']}")
+                    if src["injection_flags"]:
+                        st.caption("Injection screen masked text here: " + ", ".join(src["injection_flags"]))
+                    st.caption(src["text"][:600])
+
+    with st.expander("What is in the knowledge base"):
+        rows = {}
+        for c in kb_index.load_chunks():
+            row = rows.setdefault(c["doc_id"], {"doc_id": c["doc_id"], "title": c["title"], "type": c["doc_type"],
+                                                "vendor": c["vendor_id"] or "general", "trust": c["trust"],
+                                                "chunks": 0, "file": c["path"]})
+            row["chunks"] += 1
+        st.dataframe(pd.DataFrame(rows.values()), hide_index=True)
+        if info["screened_chunks"]:
+            st.markdown("**Masked by the injection screen before indexing**")
+            st.dataframe(pd.DataFrame(info["screened_chunks"]), hide_index=True)
+
+# ----------------------------------------------------------------------
+# 8. Automation - n8n follow-up workflows
+# ----------------------------------------------------------------------
+with tab_auto:
+    st.subheader("⚡ Automation with n8n")
+    url = automation.webhook_url()
+    if url:
+        st.success(f"Events are sent to the n8n webhook ({url.split('/webhook')[0]}/webhook/...).", icon="🔗")
+    else:
+        st.info("No N8N_WEBHOOK_URL set: events are kept in the outbox below. Run n8n and add the webhook URL "
+                "to .env or Streamlit secrets to send them live.", icon="📮")
+    st.markdown("""
+| n8n workflow (in `n8n/`) | Trigger | What it does |
+| :--- | :--- | :--- |
+| 1. AP control alerts | Webhook from this app | Formats each event, emails the Finance Controller (approvals, fraud, blocks), opens a call-back task for bank changes, logs every event in Postgres |
+| 2. Daily MSME & discount digest | Schedule, 09:00 IST | Reads the open invoices and vendors, lists MSME deadlines within 7 days, discount windows and non-PO invoices, emails the digest |
+| 3. Bank-change call-back form | n8n form filled by the Vendor Master team | Checks the number called against the phone on file in the contract, records VERIFIED or FAILED, escalates failures |
+""")
+    events = automation.read_outbox()
+    since = state.started_at
+    mine = [e for e in events if e["occurred_at"] >= since] if not REPLAY_DIR else events
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Events this session", len(mine))
+    c2.metric("Critical", sum(e["severity"] == "critical" for e in mine))
+    c3.metric("Waiting for a human", sum(e["event"] == "APPROVAL_REQUIRED" for e in mine))
+    if mine:
+        df = pd.DataFrame([{"time": e["occurred_at"][11:19], "event": e["event"], "severity": e["severity"],
+                            "agent": e["agent"], "about": e.get("key", ""), "delivery": e["delivery"],
+                            "payload": json.dumps(e["payload"])[:160]} for e in reversed(mine)])
+        st.dataframe(df, hide_index=True)
+        st.download_button("Download events (JSON)", json.dumps(mine, indent=2), "n8n_events.json", "application/json")
+    else:
+        st.caption("No events yet. Verify INV-1002 or ask the Payment agent to pay INV-1003.")
+    if st.button("Send a test event"):
+        rec = automation.emit("TEST", "streamlit-app", note="Test event from the Automation tab")
+        st.toast(f"Test event: {rec['delivery']}")
+        st.rerun()
+    with st.expander("Workflow files"):
+        for f in sorted((HERE / "n8n").glob("*.json")):
+            st.download_button(f"Download {f.name}", f.read_text(encoding="utf-8"), f.name, "application/json",
+                               key=f"dl-{f.name}")
+
+# ----------------------------------------------------------------------
+# 9. Red Team - adversarial tests, v1 skill vs v2 skill (Lab 12)
+# ----------------------------------------------------------------------
+with tab_red:
+    import red_team
+    st.subheader("🧪 Red-team lab: weak v1 skill vs hardened v2 skill")
+    st.caption("Each attack resets the demo data, runs the Payment Approval agent with the chosen skill version, "
+               "and the human approver automatically answers NO. Uses several Gemini calls per attack.")
+    picks = st.multiselect("Attacks", list(red_team.ATTACKS), default=[1],
+                           format_func=lambda n: f"{n}. {red_team.ATTACKS[n]['name']}")
+    versions = st.multiselect("Skill versions", ["v1", "v2"], default=["v1", "v2"])
+    if st.button("Run selected attacks", type="primary", disabled=not (picks and versions)):
+        if "llm" not in state:
+            st.error("Add your Gemini API key in the sidebar first.")
+        else:
+            bar = st.progress(0.0, text="Running attacks...")
+            jobs = [(n, v) for n in picks for v in versions]
+            for i, (n, v) in enumerate(jobs, 1):
+                bar.progress((i - 1) / len(jobs), text=f"Attack {n} on {v}...")
+                try:
+                    r = asyncio.run(red_team.run_attack(n, v, state.llm))
+                    gate = [f"{c['arguments'].get('invoice_id')}: {c['route']}" for c in r["calls"]
+                            if c["tool"] == "release_payment"]
+                    state.red_team.append({
+                        "attack": f"{n}. {red_team.ATTACKS[n]['name']}", "skill": v, "tool_calls": len(r["calls"]),
+                        "release_payment gate": "; ".join(gate) or "no payment attempted",
+                        "money paid": ", ".join(f"{p['invoice_id']} Rs {p['amount_inr']:,.0f}" for p in r["payments"]) or "None",
+                        "expected": red_team.ATTACKS[n]["expect"], "answer": r["answer"],
+                        "tools": [f"{c['tool']} [{c['route']}]" for c in r["calls"]]})
+                except Exception as e:                                   # noqa: BLE001
+                    state.red_team.append({"attack": f"{n}. {red_team.ATTACKS[n]['name']}", "skill": v,
+                                           "tool_calls": 0, "release_payment gate": "error",
+                                           "money paid": "-", "expected": red_team.ATTACKS[n]["expect"],
+                                           "answer": friendly_error(e), "tools": []})
+            reset()
+            bar.progress(1.0, text="Done - demo data reset")
+    if state.red_team:
+        st.dataframe(pd.DataFrame(state.red_team)[["attack", "skill", "tool_calls", "release_payment gate",
+                                                    "money paid", "expected"]], hide_index=True)
+        for r in state.red_team:
+            with st.expander(f"Attack {r['attack']} - skill {r['skill']}: agent's answer and tool calls"):
+                st.caption(" → ".join(r["tools"]) or "no tool calls")
+                st.markdown(r["answer"])
+
 # ----------------------------------------------------------------------
 # 6. How it works
 # ----------------------------------------------------------------------
@@ -341,10 +583,13 @@ digraph {
   skill [label="SKILL.md +\\npolicy file"]; llm [label="Gemini\\nreasons, picks tools"];
   gate [label="Policy gate\\nlimits, audit, approval queue", style="rounded,filled", fillcolor="#e3eefc"];
   fc [label="Finance Controller\\nApprove / Reject"]; client [label="MCP client"];
-  server [label="p2p_server.py\\n13 tools, 1 resource, 3 prompts"]; erp [label="Demo ERP\\n(JSON files)"];
+  server [label="p2p_server.py\\n14 tools, 2 resources, 3 prompts"]; erp [label="Demo ERP\\n(JSON files)"];
+  kb [label="Knowledge base (RAG)\\nChromaDB + BM25\\nSOPs, laws, contracts, emails", style="rounded,filled", fillcolor="#e6f6ef"];
+  n8n [label="n8n workflows\\nalerts, digest, call-back form", style="rounded,filled", fillcolor="#fdf0e6"];
   user -> app; skill -> llm; app -> llm [label="question"]; llm -> gate [label="tool call"];
   gate -> fc [label="above limit"]; gate -> client [label="approved"]; fc -> client;
-  client -> server [label="JSON-RPC 2.0 / stdio"]; server -> erp;
+  client -> server [label="JSON-RPC 2.0 / stdio"]; server -> erp; server -> kb [label="search_p2p_knowledge"];
+  gate -> n8n [label="events (webhook)"]; app -> kb [label="Policy Assistant"];
 }""")
     st.markdown("""
 | Step | What happens | Course link |
@@ -353,4 +598,6 @@ digraph {
 | 2. Reason | Gemini gets only the chosen SKILL.md, the policy and that skill's allowed tools | Lab 10, Lab 11 |
 | 3. Authorize | Every proposed call passes the policy gate: auto, blocked, or parked for a human | Lab 9 |
 | 4. Execute | Approved calls go to the server, which re-checks payments before money moves | Lab 7, Lab 12 |
+| 5. Retrieve | Agents cite contracts and rules through `search_p2p_knowledge`; the Policy Assistant runs agentic RAG | RAG module |
+| 6. Follow up | Holds, approvals, fraud flags and payments become n8n events: emails, call-back tasks, Postgres log | n8n module |
 """)

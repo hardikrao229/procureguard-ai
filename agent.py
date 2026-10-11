@@ -8,6 +8,7 @@ This file is the MCP HOST + MCP CLIENT. It connects three things:
                          | proposes tool calls
                          v
                     PolicyGate (security + human approval)       <- Lab 9
+                         |                     automation.py -> n8n (alerts, call-back tasks)
                          |
                          v
                     MCP Client  --JSON-RPC over stdio-->  p2p_server.py   <- Labs 7-8
@@ -36,6 +37,7 @@ from google.genai import errors, types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+import automation
 from policy import load_policy
 from policy_gate import PolicyGate
 from skill_loader import list_skills, load_skill
@@ -178,6 +180,10 @@ class ProcureGuardAgent:
                     status = "BLOCKED" if route == "BLOCKED" else route
                     self.log(f"    [{route}] -> {message}")
                 self.trace.append({"tool": call.name, "arguments": args, "gate": route, "result": str(status)})
+                try:                                                # hand follow-up work to n8n
+                    automation.from_tool_call(self.skill["meta"]["name"], call.name, args, route, data)
+                except Exception as e:                              # noqa: BLE001 - automation never breaks the agent
+                    self.log(f"    [n8n] event not sent: {e}")
                 self._record(f"- tool `{call.name}` {json.dumps(args)} -> gate: {route}; "
                              f"result: {json.dumps(data)[:300]}\n")
                 reply_parts.append(types.Part.from_function_response(name=call.name, response={"result": data}))

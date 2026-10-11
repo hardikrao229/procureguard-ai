@@ -25,6 +25,7 @@ READ_ONLY_TOOLS = {
     "list_open_invoices", "get_invoice", "get_purchase_order", "get_goods_receipt",
     "get_vendor_profile", "get_payment_history", "get_cash_position", "three_way_match",
     "check_duplicate_invoice", "calculate_vendor_risk_score", "calculate_payment_schedule",
+    "search_p2p_knowledge",
 }
 PROTECTIVE_TOOLS = {"place_invoice_on_hold"}      # changes data, but only makes things safer
 HIGH_STAKES_TOOLS = {"release_payment"}           # moves money

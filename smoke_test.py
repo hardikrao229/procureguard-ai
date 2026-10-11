@@ -60,9 +60,17 @@ async def main() -> None:
                      await session.call_tool("calculate_payment_schedule", {"invoice_id": "INV-1003"}))
                 show("get_cash_position",
                      await session.call_tool("get_cash_position", {}))
+                show("get_invoice INV-1006 (notes screening should flag the fake CFO override)",
+                     await session.call_tool("get_invoice", {"invoice_id": "INV-1006"}))
+                show("search_p2p_knowledge (RAG): Apex Steel call-back phone on file",
+                     await session.call_tool("search_p2p_knowledge", {"query": "authorised contacts on file call-back phone",
+                                                                      "doc_type": "contract", "vendor_id": "V002"}))
 
                 policy = await session.read_resource("policy://p2p-heuristics")
                 print(f"\n--- Resource policy://p2p-heuristics: {len(policy.contents[0].text)} characters loaded")
+                kb = json.loads((await session.read_resource("kb://index")).contents[0].text)
+                print(f"--- Resource kb://index: {kb['documents']} documents, {kb['chunks']} chunks, "
+                      f"{len(kb['screened_chunks'])} chunk(s) masked by the injection screen")
 
     print("\nSMOKE TEST PASSED - your MCP server is working.")
 
